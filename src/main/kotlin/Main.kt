@@ -65,7 +65,22 @@ fun main(
         return null
     }
 
-    fun mapType(
+    fun mapFieldType(
+        type : String
+    ) = if(type.startsWith("L") && type.endsWith(";")) {
+        var className = type.removePrefix("L").removeSuffix(";")
+        val classEntry = findEntry(classes, className) { it.official }
+
+        if(classEntry != null) {
+            className = classEntry.intermediary
+        }
+
+        "L$className;"
+    } else {
+        type
+    }
+
+    fun mapMethodType(
         type : String
     ) = try {
         val returnType = type.split(")")[1]
@@ -142,7 +157,7 @@ fun main(
                         var official = split[1]
                         val intermediary = split[4]
                         val named = split[5]
-                        var type = split[2]
+                        val type = split[2]
 
                         val classEntry = findEntry(classes, official) { it.official }
 
@@ -178,9 +193,15 @@ fun main(
         }
     }
 
+    for(field in fields) {
+        if(field.type.startsWith("L") && field.type.endsWith(";")) {
+            field.type = mapFieldType(field.type)
+        }
+    }
+
     for(method in methods) {
         if(method.type.contains("L")) {
-            method.type = mapType(method.type)
+            method.type = mapMethodType(method.type)
         }
     }
 
