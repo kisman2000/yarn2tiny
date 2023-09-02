@@ -1,4 +1,5 @@
 import java.io.File
+import java.lang.IllegalArgumentException
 import java.lang.IndexOutOfBoundsException
 import kotlin.system.exitProcess
 
@@ -65,56 +66,35 @@ fun main(
         return null
     }
 
-    fun mapFieldType(
-        type : String
-    ) = if(type.startsWith("L") && type.endsWith(";")) {
-        var className = type.removePrefix("L").removeSuffix(";")
-        val classEntry = findEntry(classes, className) { it.official }
-
-        if(classEntry != null) {
-            className = classEntry.intermediary
+    fun mapDescriptor(
+        descriptor : String
+    ) = if(descriptor.startsWith('L') || (descriptor.startsWith('[') && descriptor.contains("[L"))) {
+        val arrayDimension = if(descriptor.contains("[")) {
+            descriptor.substring(0..descriptor.lastIndexOf('['))
+        } else {
+            ""
         }
 
-        "L$className;"
+        val className = descriptor.removePrefix("${arrayDimension}L").removeSuffix(";")
+        val classEntry = findEntry(classes, className) { it.official }
+
+        "${arrayDimension}L${classEntry?.intermediary ?: className};"
     } else {
-        type
+        descriptor
     }
 
     fun mapMethodType(
         type : String
     ) = try {
-        val returnType = type.split(")")[1]
-        val paramTypes = type.removePrefix("(").removeSuffix(")$returnType").split(";")
-        var mappedReturnType = ""
-        val mappedParamTypes = mutableListOf<String>()
+        val signatureNode = SignatureNode(type)
+        val params = mutableListOf<String>()
+        val returnType = mapDescriptor(signatureNode.returnType)
 
-        if(returnType.contains("L")) {
-            var className = returnType.removePrefix("L").removeSuffix(";")
-            val classEntry = findEntry(classes, className) { it.official }
-
-            if(classEntry != null) {
-                className = classEntry.intermediary
-            }
-
-            mappedReturnType = "L$className;"
+        for(param in signatureNode.params) {
+            params.add(mapDescriptor(param))
         }
 
-        for(paramType in paramTypes) {
-            if(paramType.isNotEmpty() && paramType.startsWith("L")) {
-                var className = paramType.removePrefix("L")
-                val classEntry = findEntry(classes, className) { it.official }
-
-                if(classEntry != null) {
-                    className = classEntry.intermediary
-                }
-
-                mappedParamTypes.add("L$className")
-            } else {
-                mappedParamTypes.add(paramType)
-            }
-        }
-
-        "(${mappedParamTypes.joinToString(";")})$mappedReturnType"
+        "(${params.joinToString("")})$returnType"
     } catch(exception : IndexOutOfBoundsException) {
         exit("Cannot map $type description!")
 
@@ -194,8 +174,8 @@ fun main(
     }
 
     for(field in fields) {
-        if(field.type.startsWith("L") && field.type.endsWith(";")) {
-            field.type = mapFieldType(field.type)
+        if(field.type.contains("L")) {
+            field.type = mapDescriptor(field.type)
         }
     }
 
@@ -248,3 +228,155 @@ open class YarnEntry(
     val named : String,
     var type : String = ""
 )
+
+class SignatureNode(
+    signature : String
+) : SignatureVisitor() {
+    private var listeningParams = false
+    private var listeningReturnType = false
+    private var arrayDimension = 0
+
+    val params = mutableListOf<String>()
+    var returnType = "V"
+
+    init {
+        SignatureReader(signature).accept(this)
+    }
+
+    override fun visitParamType() = this.also {
+        listeningParams = true
+        listeningReturnType = false
+    }
+
+    override fun visitReturnType() = this.also {
+        listeningParams = false
+        listeningReturnType = true
+    }
+
+    override fun visitArrayType() = this.also {
+        arrayDimension++
+    }
+
+    override fun visitBaseType(
+        descriptor : Char
+    ) {
+        if(listeningParams) {
+            params.add("${"[".repeat(arrayDimension)}$descriptor")
+            arrayDimension = 0
+        } else if(listeningReturnType) {
+            returnType = "${"[".repeat(arrayDimension)}$descriptor"
+
+            listeningReturnType = false
+            arrayDimension = 0
+        }
+    }
+
+    override fun visitClassType(
+        name : String
+    ) {
+        if(listeningParams) {
+            params.add("${"[".repeat(arrayDimension)}L$name;")
+            arrayDimension = 0
+        } else if(listeningReturnType) {
+            returnType = "${"[".repeat(arrayDimension)}L$name;"
+
+            listeningReturnType = false
+            arrayDimension = 0
+        }
+    }
+
+    override fun visitInnerClassType(
+        name : String
+    ) {
+        visitClassType(name)
+    }
+
+    override fun visitEnd() {
+        listeningParams = false
+        listeningReturnType = false
+        arrayDimension = 0
+    }
+}
+
+//Only MethodTypeSignature without generic types
+abstract class SignatureVisitor {
+    open fun visitParamType() = this
+    open fun visitReturnType() = this
+    open fun visitArrayType() = this
+
+    open fun visitBaseType(
+        descriptor : Char
+    ) { }
+
+    open fun visitClassType(
+        name : String
+    ) { }
+
+    open fun visitInnerClassType(
+        name : String
+    ) { }
+
+    open fun visitEnd() { }
+}
+
+//Only MethodTypeSignature without generic types
+class SignatureReader(
+    private val signature : String
+) {
+    fun accept(
+        visitor : SignatureVisitor
+    ) {
+        var offset = 1
+
+        while(signature[offset] != ')') {
+           offset = parseType(signature, offset, visitor.visitParamType())
+        }
+
+        parseType(signature, offset + 1, visitor.visitReturnType())
+    }
+
+    private fun parseType(
+        signature : String,
+        offset : Int,
+        visitor : SignatureVisitor
+    ) : Int {
+        var startOffset = offset
+        var char = signature[startOffset++]
+
+        return when(char) {
+            'Z', 'C', 'B', 'S', 'I', 'F', 'J', 'D', 'V' -> {
+                visitor.visitBaseType(char)
+
+                startOffset
+            }
+
+            '[' -> {
+                parseType(signature, startOffset, visitor.visitArrayType())
+            }
+
+            'L' -> {
+                val start = startOffset
+                val name : String?
+
+                while(true) {
+                    char = signature[startOffset++]
+
+                    if(char == ';') {
+                        name = signature.substring(start, startOffset - 1)
+
+                        visitor.visitClassType(name)
+                        visitor.visitEnd()
+
+                        break
+                    }
+                }
+
+                startOffset
+            }
+
+            else -> {
+                throw IllegalArgumentException()
+            }
+        }
+    }
+}
